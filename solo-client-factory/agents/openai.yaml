@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent-Native 开发工厂"
+  short_description: "面向长周期软件开发任务的多Agent分工、审批、评测与审计技能"
+  default_prompt: "使用 $solo-client-factory 按 Agent 工厂流程处理这个目标："

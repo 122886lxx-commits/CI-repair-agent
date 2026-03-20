@@ -1,0 +1,34 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ci_repair_agent
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+
+  app:
+    build:
+      context: .
+    env_file:
+      - .env
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+
+  worker:
+    build:
+      context: .
+    command: ["npm", "run", "dev:worker"]
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+
+volumes:
+  postgres-data:
