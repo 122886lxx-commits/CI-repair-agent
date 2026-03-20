@@ -1,63 +1,229 @@
 # CI Repair Agent
 
-生产级 v1 骨架，面向 `GitHub + GitHub Actions` 的内部 CI 修复控制面。
+An agent-native control plane for repairing failed GitHub Actions runs.
 
-## 核心能力
+This project is not a generic coding assistant. It is a bounded system that turns a CI failure into a governed workflow:
 
-- 控制面 API：创建任务、查看任务、审批、拒绝、rerun
-- Web 控制台：任务列表、任务详情、Diff、审批、审计
-- Worker：轮询队列并驱动 Orchestrator 流程
-- GitHub 集成：workflow run 上下文读取、OAuth 登录、Draft PR 接口
-- 风险闸门：workflow、auth、数据库、删除、依赖升级等高风险变更自动进入人工审批
-- Live sandbox：开启 `LIVE_SANDBOX=true` 后，系统会克隆仓库、应用补丁、推断验证命令并在容器内执行
-- PostgreSQL 持久化：Job、TaskGraph、ApprovalGate、EvalResult、AuditEvent
+`failure context -> task spec -> repair diff -> sandbox validation -> risk gate -> draft PR -> audit trail`
 
-## 本地运行
+## Why This Exists
 
-1. 安装依赖
+Most AI coding tools can generate a patch. Very few can answer the harder production questions:
+
+- Should this patch be allowed to run at all?
+- What counts as a high-risk change?
+- Was the patch validated in an isolated environment?
+- Can a reviewer see why the system acted?
+- Can the whole flow be rerun without losing traceability?
+
+CI Repair Agent focuses on that governance layer.
+
+## What It Does
+
+- Ingests failed GitHub Actions runs
+- Builds a `TaskSpec`, `TaskGraph`, and `AgentAssignment`
+- Generates a bounded repair proposal with an LLM
+- Validates the patch in a sandbox
+- Routes risky changes into human approval
+- Opens a draft PR for low-risk repairs
+- Stores `ApprovalGate`, `EvalResult`, and `AuditEvent` records
+- Exposes a web console for review, approval, rerun, and audit
+
+## Product Boundaries
+
+This v1 is intentionally narrow.
+
+It does:
+
+- GitHub only
+- GitHub Actions only
+- Single-tenant internal deployment
+- Draft PR flow
+- Human approval for risky changes
+- Audit-first execution
+
+It does not do:
+
+- Auto-merge
+- Direct pushes to `main`
+- Multi-tenant RBAC and billing
+- Provider routing across multiple model vendors
+- A general-purpose agent runtime
+
+## How It Works
+
+The system follows an agent-native workflow with five fixed roles:
+
+- `Orchestrator`
+- `Builder`
+- `Reviewer`
+- `Evaluator`
+- `Release Gatekeeper`
+
+High-level execution flow:
+
+1. Read workflow metadata and failure context.
+2. Build a bounded task spec and task graph.
+3. Ask the model provider for a repair diff.
+4. Validate the diff in a sandbox.
+5. Apply policy heuristics to detect risky surfaces.
+6. Open a draft PR or stop at an approval gate.
+7. Write audit events for the full run.
+
+```mermaid
+flowchart LR
+  A["GitHub Actions failure"] --> B["TaskSpec + TaskGraph"]
+  B --> C["Repair patch"]
+  C --> D["Sandbox validation"]
+  C --> E["Risk engine"]
+  D --> F["Release Gate"]
+  E --> F
+  F -->|Low risk| G["Draft PR"]
+  F -->|High risk| H["Human approval"]
+  G --> I["Audit trail"]
+  H --> I
+```
+
+## Architecture
+
+- `src/app`: Next.js control plane and API routes
+- `src/worker`: polling worker that advances queued jobs
+- `src/server/services/job-service.ts`: main orchestration logic
+- `src/server/github`: GitHub Actions, OAuth, branch push, and PR creation
+- `src/server/sandbox`: repo clone, patch apply, validation planning, Docker execution
+- `src/server/risk`: policy heuristics and approval triggers
+- `src/server/db`: memory and PostgreSQL repositories
+
+Core persisted objects:
+
+- `Job`
+- `TaskSpec`
+- `TaskGraph`
+- `AgentAssignment`
+- `DiffCandidate`
+- `ApprovalGate`
+- `EvalResult`
+- `AuditEvent`
+
+## Modes
+
+There are two practical runtime modes in this repo:
+
+### Dry-run mode
+
+Default local mode. Good for UI, API, and workflow testing.
+
+- `AUTH_BYPASS=true`
+- `LIVE_SANDBOX=false`
+- GitHub service returns synthetic workflow context
+- No real branch push or PR creation
+
+### Live mode
+
+Real GitHub + Docker execution path.
+
+Required:
+
+- GitHub App credentials
+- GitHub OAuth credentials
+- OpenAI API key
+- PostgreSQL
+- Docker
+- `LIVE_SANDBOX=true`
+
+In live mode, the system can:
+
+- clone a target repository at a specific SHA
+- apply a generated patch
+- infer validation commands from repo scripts and lockfiles
+- run install and validation in containers
+- push a repair branch
+- create a draft PR
+
+## Risk Gates
+
+The risk engine routes these surfaces into approval:
+
+- `.github/workflows/*`
+- infrastructure configuration
+- auth or permission surfaces
+- schema or migration files
+- destructive deletes
+- dependency upgrade patches
+- hotfix residual-risk review
+
+Low-risk source edits can continue automatically. High-risk changes stop at an `ApprovalGate`.
+
+## Quick Start
+
+### 1. Install
 
 ```bash
 npm install
 ```
 
-2. 复制环境变量
+### 2. Configure env
 
 ```bash
 cp .env.example .env
 ```
 
-3. 启动 PostgreSQL
+Local development defaults:
+
+- `AUTH_BYPASS=true`
+- `LIVE_SANDBOX=false`
+- `DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/ci_repair_agent`
+
+### 3. Start PostgreSQL
 
 ```bash
 docker compose up -d postgres
 ```
 
-4. 启动控制台
+### 4. Start the control plane
 
 ```bash
 npm run dev
 ```
 
-5. 启动 worker
+### 5. Start the worker
 
 ```bash
 npm run dev:worker
 ```
 
-默认 `AUTH_BYPASS=true`，本地开发会直接以 `local-operator` 身份登录。生产环境应关闭绕过并配置 GitHub OAuth、GitHub App 和 PostgreSQL。
+Open `http://127.0.0.1:3000`.
 
-如果要启用真实修复流，需要额外配置：
+## Verification
 
-- `GITHUB_APP_ID`
-- `GITHUB_PRIVATE_KEY`
-- `GITHUB_WEBHOOK_SECRET`
-- `GITHUB_OAUTH_CLIENT_ID`
-- `GITHUB_OAUTH_CLIENT_SECRET`
-- `OPENAI_API_KEY`
-- `LIVE_SANDBOX=true`
-- 本机可用 `git` 与 `docker`
+```bash
+npm run check
+npm run build
+```
 
-## API
+Current test coverage includes:
+
+- risk-engine approval behavior
+- sandbox network/install behavior
+- rerun state reset and attempt increment
+- API auth returning typed `401` responses
+
+## API Surface
+
+### Create job
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/jobs \
+  -H "content-type: application/json" \
+  -d '{
+    "repo": "acme/repo",
+    "sha": "abc123def456",
+    "workflow_run_id": 42,
+    "mode": "fix"
+  }'
+```
+
+### Main routes
 
 - `POST /api/jobs`
 - `GET /api/jobs`
@@ -68,18 +234,48 @@ npm run dev:worker
 - `POST /api/jobs/:id/rerun`
 - `POST /api/github/webhooks`
 
-## 生产说明
+## Environment
 
-这个 v1 已经实现了：
+See [.env.example](.env.example).
 
-- 任务建模、任务图、风险闸门、评测和审计的主数据流
-- GitHub OAuth、GitHub App、真实分支推送和 Draft PR 的执行路径
-- 单租户内部云服务的控制面结构
-- live sandbox 下的仓库克隆、补丁应用、命令推断和容器化验证
+Important variables:
 
-它还没有完整实现：
+- `GITHUB_APP_ID`
+- `GITHUB_PRIVATE_KEY`
+- `GITHUB_WEBHOOK_SECRET`
+- `GITHUB_OAUTH_CLIENT_ID`
+- `GITHUB_OAUTH_CLIENT_SECRET`
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
+- `DATABASE_URL`
+- `LIVE_SANDBOX`
+- `SANDBOX_NETWORK_DISABLED`
 
-- 实仓库克隆后对真实 patch 的应用与 push
-- 多模型路由
-- 实时日志流
-- 多租户隔离和计费
+## Repository Status
+
+This repo is already usable as a serious v1 skeleton:
+
+- control plane UI
+- worker loop
+- PostgreSQL persistence
+- GitHub App and OAuth adapters
+- draft PR flow
+- Docker-based sandbox validation
+- approval and audit model
+
+Still incomplete:
+
+- richer repository-specific bootstrap detection
+- more robust patch fallback and recovery policy
+- broader eval datasets from real CI failures
+- live observability and streaming execution logs
+- production hardening beyond single-tenant internal use
+
+## Related Docs
+
+- [AI PM case study](docs/ai-pm-case-study.md)
+- [solo-client-factory skill](solo-client-factory/SKILL.md)
+
+## License
+
+No license file has been added yet. Until one is added, treat this repository as all rights reserved.
